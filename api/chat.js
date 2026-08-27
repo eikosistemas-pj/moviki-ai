@@ -55,6 +55,7 @@ const { admin, db } = require('../lib/firebase');
 const { perguntarClaude } = require('../lib/anthropic');
 const { montarSystemPrompt } = require('../lib/promptPainel');
 const { montarContexto } = require('../lib/contextoUsuario');
+const memoria = require('../lib/memoria');
 
 const ORIGENS_PADRAO = [
   'https://app.moviki.com.br',
@@ -169,7 +170,12 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({ ok: true, resposta: 'anexo_sem_texto' });
     }
 
-    const contexto = await montarContexto(uid, eu.email);
+    // Devolve o texto do contexto E o id da oferta que o lib/oportunidade.js
+    // escolheu — o id precisa ser gravado junto com a resposta, senao um
+    // "nao" da pessoa na mensagem seguinte nao teria a que se referir.
+    const ctx = await montarContexto(uid, eu.email);
+    const contexto = ctx.texto;
+    const ofertaId = ctx.ofertaId;
     const historico = msgs.slice(0, -1).map((m) => ({
       role: (m.de === 'lojista') ? 'user' : 'assistant',
       texto: String(m.texto || (m.arquivoNome ? '[enviou o arquivo ' + m.arquivoNome + ']' : '')).slice(0, 2000),
@@ -186,7 +192,25 @@ module.exports = async function handler(req, res) {
     // time responde depois — que e exatamente o comportamento de antes.
     if (!resposta) return res.status(200).json({ ok: false, erro: 'ia_indisponivel' });
 
-    await gravarResposta(convRef, uid, ultima.id, dia, usadas, resposta.slice(0, 2000));
+    // O Vik responde e, no MESMO texto, acrescenta no fim um bloco marcado
+    // com o que aprendeu. Aqui o bloco e arrancado antes de qualquer coisa:
+    // limparResposta() corta a partir do marcador de abertura mesmo que o
+    // bloco esteja malformado ou sem fechamento. Perder um aprendizado e
+    // barato; mostrar tripa de prompt para o lojista, nao.
+    const limpa = memoria.limparResposta(resposta);
+    const aprendido = memoria.extrairAprendizado(resposta);
+
+    // Resposta que sobrou vazia depois da limpeza = a IA mandou so o bloco.
+    // Melhor nao gravar nada do que gravar bolha em branco.
+    if (!limpa) return res.status(200).json({ ok: false, erro: 'resposta_vazia' });
+
+    await gravarResposta(convRef, uid, ultima.id, dia, usadas, limpa.slice(0, 2000));
+
+    // Memoria e um bonus: grava DEPOIS da mensagem e nunca derruba a
+    // resposta se falhar. Mesmo contrato do lib/ga.js e do lib/meta.js.
+    try { await memoria.gravar(uid, aprendido, ofertaId); }
+    catch (me) { console.error('[chat] memoria (ignorado):', me && me.message); }
+
     return res.status(200).json({ ok: true, resposta: 'gravada' });
   } catch (e) {
     console.error('[chat] erro:', e);
