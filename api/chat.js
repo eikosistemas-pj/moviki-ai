@@ -57,6 +57,7 @@ const { perguntarClaude } = require('../lib/anthropic');
 const { montarSystemPrompt } = require('../lib/promptPainel');
 const { montarContexto } = require('../lib/contextoUsuario');
 const memoria = require('../lib/memoria');
+const { respostaSegura } = require('../lib/segurancaVik');
 
 const ORIGENS_PADRAO = [
   'https://app.moviki.com.br',
@@ -282,6 +283,28 @@ module.exports = async function handler(req, res) {
     // Melhor nao gravar nada do que gravar bolha em branco.
     if (!limpa) return res.status(200).json({ ok: false, erro: 'resposta_vazia' });
 
+    // ----------------------------------------------------------------
+    // SEGUNDA CAMADA DE CONFORMIDADE — o filtro do servidor.
+    // O prompt ja proibe promessa de ganho, garantia, negociacao de preco e
+    // tripa interna. Prompt e instrucao, nao trava: aqui a resposta pronta e
+    // conferida ANTES de existir no banco. Barrou, a frase problematica e
+    // descartada inteira e nunca chega ao lojista.
+    // Ver lib/segurancaVik.js (e lib/segurancaVik.test.js, que roda offline).
+    // ----------------------------------------------------------------
+    const conf = respostaSegura(limpa);
+    if (!conf.ok) {
+      // Log so no servidor. O trecho barrado NUNCA vai para o Firestore nem
+      // para a tela: se fosse gravado "para o dono ver depois", a frase de
+      // promessa passaria a existir por escrito — que e exatamente o que
+      // este filtro impede.
+      console.error('[chat] resposta BARRADA (' + conf.motivo + ') uid=' + uid +
+                    ' trecho="' + (conf.trecho || '') + '"');
+      await gravarResposta(convRef, uid, ultima.id, dia, usadas, conf.texto, conf.motivo);
+      // Memoria NAO entra aqui de proposito: o bloco de aprendizado veio da
+      // mesma resposta que foi reprovada, e nao ha por que confiar nele.
+      return res.status(200).json({ ok: true, resposta: 'barrada', motivo: conf.motivo });
+    }
+
     await gravarResposta(convRef, uid, ultima.id, dia, usadas, limpa.slice(0, 2000));
 
     // Memoria e um bonus: grava DEPOIS da mensagem e nunca derruba a
@@ -316,7 +339,7 @@ function alternar(lista) {
 /* Escreve a resposta e os carimbos em UM lote: ou entra tudo, ou nada.
    Sem lote, uma falha no meio deixaria a mensagem gravada sem o
    botRespondeuAte — e a proxima chamada responderia de novo. */
-async function gravarResposta(convRef, uid, msgId, dia, usadas, texto) {
+async function gravarResposta(convRef, uid, msgId, dia, usadas, texto, filtroMotivo) {
   const lote = db.batch();
   const nova = convRef.collection('mensagens').doc();
   lote.set(nova, {
@@ -324,7 +347,7 @@ async function gravarResposta(convRef, uid, msgId, dia, usadas, texto) {
     texto: texto,
     criadoEm: admin.firestore.FieldValue.serverTimestamp(),
   });
-  lote.set(convRef, {
+  const conv = {
     uid: uid,
     ultimaMsg: String(texto).slice(0, 200),
     ultimaEm: admin.firestore.FieldValue.serverTimestamp(),
@@ -332,6 +355,16 @@ async function gravarResposta(convRef, uid, msgId, dia, usadas, texto) {
     botRespondeuAte: msgId,
     botDia: dia,
     botUsos: usadas + 1,
-  }, { merge: true });
+  };
+  // Marca so quando o filtro barrou. Guarda o MOTIVO (uma etiqueta curta como
+  // 'promessa_de_ganho'), nunca o texto barrado, e serve para o painel do dono
+  // saber que aquela conversa precisa de gente. Nao desliga o Vik: um falso
+  // positivo nao pode calar o assistente daquela pessoa para sempre.
+  if (filtroMotivo) {
+    conv.botFiltro = String(filtroMotivo).slice(0, 40);
+    conv.botFiltroEm = admin.firestore.FieldValue.serverTimestamp();
+    conv.botFiltros = admin.firestore.FieldValue.increment(1);
+  }
+  lote.set(convRef, conv, { merge: true });
   await lote.commit();
 }
