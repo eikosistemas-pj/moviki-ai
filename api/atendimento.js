@@ -49,6 +49,7 @@ const { admin, db } = require('../lib/firebase');
 const { perguntarClaude } = require('../lib/anthropic');
 const { enviarTextoWhatsapp } = require('../lib/whatsapp');
 const { SYSTEM_PROMPT } = require('../lib/promptAtendimento');
+const { respostaSegura } = require('../lib/segurancaVik');
 
 const MAX_HISTORICO = 24; // ~12 idas e vindas guardadas por conversa
 
@@ -174,8 +175,20 @@ module.exports = async (req, res) => {
       mensagemNova: textoCliente,
     });
 
-    const textoResposta = respostaIA ||
+    const bruta = respostaIA ||
       'Tive um problema pra responder agora. Fala com a gente no suporte@moviki.com.br ou wa.me/554120186848 que resolvemos rápido.';
+
+    /* MESMO filtro de conformidade do Vik do painel (lib/segurancaVik.js).
+       Aqui o risco é ainda maior: no WhatsApp a frase sai para um DESCONHECIDO
+       e vira print. Promessa de ganho por escrito é o que já deixou uma conta
+       de anúncios da Moviki restrita na Meta. Barrou, manda a frase neutra. */
+    const conf = respostaSegura(bruta,
+      'Prefiro não responder isso por aqui pra não te passar informação errada. ' +
+      'Fala com a gente no suporte@moviki.com.br ou no wa.me/554120186848 que uma pessoa te atende.');
+    if (!conf.ok) {
+      console.error('[atendimento] resposta BARRADA (' + conf.motivo + ') trecho="' + (conf.trecho || '') + '"');
+    }
+    const textoResposta = conf.ok ? bruta : conf.texto;
 
     await enviarTextoWhatsapp(telefone, textoResposta);
 
