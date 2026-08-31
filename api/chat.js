@@ -291,25 +291,54 @@ module.exports = async function handler(req, res) {
     // descartada inteira e nunca chega ao lojista.
     // Ver lib/segurancaVik.js (e lib/segurancaVik.test.js, que roda offline).
     // ----------------------------------------------------------------
+    let textoFinal = limpa;
+    let aprendidoFinal = aprendido;
     const conf = respostaSegura(limpa);
+
     if (!conf.ok) {
       // Log so no servidor. O trecho barrado NUNCA vai para o Firestore nem
       // para a tela: se fosse gravado "para o dono ver depois", a frase de
       // promessa passaria a existir por escrito — que e exatamente o que
       // este filtro impede.
-      console.error('[chat] resposta BARRADA (' + conf.motivo + ') uid=' + uid +
+      console.error('[chat] 1a resposta BARRADA (' + conf.motivo + ') uid=' + uid +
                     ' trecho="' + (conf.trecho || '') + '"');
-      await gravarResposta(convRef, uid, ultima.id, dia, usadas, conf.texto, conf.motivo);
-      // Memoria NAO entra aqui de proposito: o bloco de aprendizado veio da
-      // mesma resposta que foi reprovada, e nao ha por que confiar nele.
-      return res.status(200).json({ ok: true, resposta: 'barrada', motivo: conf.motivo });
+
+      // ------------------------------------------------------------
+      // SEGUNDA TENTATIVA, com a correcao na frente.
+      // Barrar e mandar direto para o time transforma cada falso positivo
+      // numa pessoa esperando atendimento humano — e o time e pequeno. Na
+      // grande maioria das vezes a IA sabe a resposta certa e so escorregou
+      // no jeito de dizer. Entao ela reescreve UMA vez, sabendo o que errou.
+      // So se errar de novo e que vira encaminhamento.
+      // Custo: uma chamada extra APENAS quando barra. A funcao tem 30s.
+      // ------------------------------------------------------------
+      const resposta2 = await perguntarClaude({
+        systemPrompt: montarSystemPrompt(contexto) + '\n\n' + avisoCorretivo(conf.motivo),
+        historico: alternar(historico),
+        mensagemNova: pergunta.slice(0, 2000),
+      });
+      const limpa2 = resposta2 ? memoria.limparResposta(resposta2) : '';
+      const conf2 = limpa2 ? respostaSegura(limpa2) : { ok: false, motivo: 'ia_indisponivel' };
+
+      if (conf2.ok) {
+        console.error('[chat] 2a tentativa passou uid=' + uid);
+        textoFinal = limpa2;
+        aprendidoFinal = memoria.extrairAprendizado(resposta2);
+      } else {
+        console.error('[chat] 2a resposta TAMBEM barrada (' + conf2.motivo + ') uid=' + uid +
+                      ' trecho="' + (conf2.trecho || '') + '"');
+        await gravarResposta(convRef, uid, ultima.id, dia, usadas, conf.texto, conf2.motivo || conf.motivo);
+        // Memoria NAO entra aqui de proposito: o bloco de aprendizado veio das
+        // mesmas respostas que foram reprovadas, e nao ha por que confiar nele.
+        return res.status(200).json({ ok: true, resposta: 'barrada', motivo: conf2.motivo || conf.motivo });
+      }
     }
 
-    await gravarResposta(convRef, uid, ultima.id, dia, usadas, limpa.slice(0, 2000));
+    await gravarResposta(convRef, uid, ultima.id, dia, usadas, textoFinal.slice(0, 2000));
 
     // Memoria e um bonus: grava DEPOIS da mensagem e nunca derruba a
     // resposta se falhar. Mesmo contrato do lib/ga.js e do lib/meta.js.
-    try { await memoria.gravar(uid, aprendido, ofertaId); }
+    try { await memoria.gravar(uid, aprendidoFinal, ofertaId); }
     catch (me) { console.error('[chat] memoria (ignorado):', me && me.message); }
 
     return res.status(200).json({ ok: true, resposta: 'gravada' });
@@ -320,6 +349,28 @@ module.exports = async function handler(req, res) {
     return res.status(200).json({ ok: false, erro: 'interno' });
   }
 };
+
+/* Texto que entra na frente do prompt na SEGUNDA tentativa. Diz o que foi
+   reprovado sem dizer como burlar: a lista e das PROIBICOES, nunca das
+   expressoes exatas que o filtro procura — se o modelo soubesse os padroes,
+   aprenderia a contorna-los em vez de parar de prometer.
+   A ultima linha importa: a pessoa nao pode ver que houve correcao. */
+function avisoCorretivo(motivo) {
+  return '=== ATENCAO: SUA RESPOSTA ANTERIOR FOI REPROVADA ===\n' +
+    'Uma verificacao automatica reprovou a resposta que voce acabou de escrever. ' +
+    'Motivo registrado: ' + String(motivo || 'conformidade') + '.\n' +
+    'Escreva a resposta de novo, do zero, para a MESMA pergunta, sem nada disto:\n' +
+    '- prometer ou estimar ganho, renda, lucro, faturamento, resultado ou prazo;\n' +
+    '- dizer que algo e garantido, certo, sem risco ou bom investimento;\n' +
+    '- oferecer desconto, ou dizer que vai estornar, cancelar ou liberar saque;\n' +
+    '- citar fornecedor ou tecnologia interna, ou se passar por pessoa;\n' +
+    '- pedir CPF, senha, cartao, chave Pix ou dado bancario.\n' +
+    'Use apenas o que esta no bloco DADOS DESTA CONTA. Se a pergunta so puder ser ' +
+    'respondida prometendo resultado, responda o que EXISTE hoje — os numeros reais ' +
+    'dela e o que cada plano inclui — e pare por ai.\n' +
+    'Nao mencione esta correcao e nao peca desculpa pela resposta anterior: para a ' +
+    'pessoa, esta e a sua primeira resposta.';
+}
 
 /* A API da Anthropic exige alternancia user/assistant e nao aceita duas
    mensagens seguidas do mesmo papel. No chat real isso acontece o tempo todo
