@@ -17,11 +17,48 @@
 //    prompt de sistema da Moviki, manda a resposta de volta pelo WhatsApp,
 //    e salva o histórico atualizado.
 //
+// ==========================================================
+//  03/09/2026 — ESTE ROBÔ ESTÁ EM STAND-BY, DE PROPÓSITO.
+//
+//  Quem atende o WhatsApp hoje é o PABX no (41) 2018-6848, com a IA do
+//  próprio WhatsApp Business, 24 horas, para quem vem de fora. Este
+//  arquivo fica guardado como PLANO B: se um dia o PABX cair ou sair,
+//  ligar este robô é só preencher as env vars e dar Redeploy.
+//
+//  COMO ELE FICA TRANCADO: sem as env vars WHATSAPP_APP_SECRET e
+//  WHATSAPP_TOKEN preenchidas na Vercel, o endpoint recusa TUDO logo na
+//  entrada (503 "stand-by") e não gasta nem uma chamada de IA. A falta
+//  da chave É a tranca — não existe estado "meio ligado".
+//
+//  COMO LIGAR, no dia em que precisar (projeto moviki-ai na Vercel):
+//    1. WHATSAPP_APP_SECRET   -> Chave Secreta do app Meta "Moviki"
+//                               (id 1003679066038534 → Configurações →
+//                                Básico → Chave secreta do app)
+//    2. WHATSAPP_TOKEN        -> token do System User / WhatsApp Cloud API
+//    3. WHATSAPP_PHONE_ID     -> id do número no WhatsApp Cloud API
+//    4. WHATSAPP_VERIFY_TOKEN -> uma frase que você inventa
+//    5. Redeploy
+//    6. No Meta Business, cadastrar a URL do webhook apontando para
+//       https://moviki-ai.vercel.app/api/atendimento
+//  Para DESLIGAR de novo: apagar WHATSAPP_APP_SECRET (ou WHATSAPP_TOKEN)
+//  e dar Redeploy. Volta ao stand-by na hora.
+//
+//  ⚠️ O QUE MUDOU HOJE, E POR QUÊ (foi uma falha real, aberta):
+//  a conferência de assinatura fazia `if (!secret) return true` — ou
+//  seja, SEM a chave cadastrada ela liberava geral. O endpoint estava
+//  no ar, publicado, aceitando qualquer POST forjado: era só mandar um
+//  corpo no formato do WhatsApp para o Claude responder e queimar
+//  crédito da conta, em laço, sem login. Agora é `return false`.
+//  REGRA DE OURO QUE NASCE DAQUI: conferência de assinatura NUNCA pode
+//  falhar aberto. Sem o segredo, ninguém entra.
+// ==========================================================
+//
 // Segurança:
+//   - Sem WHATSAPP_APP_SECRET e WHATSAPP_TOKEN, o endpoint inteiro fica
+//     em stand-by e recusa GET e POST (ver estaLigado(), abaixo).
 //   - GET exige o mesmo WHATSAPP_VERIFY_TOKEN configurado no Meta Business.
 //   - POST confere a assinatura X-Hub-Signature-256 (HMAC do corpo cru com
-//     o WHATSAPP_APP_SECRET) sempre que a env estiver configurada — evita
-//     que qualquer um chame o endpoint se fingindo de Meta.
+//     o WHATSAPP_APP_SECRET). Sem a env, recusa — nunca falha aberto.
 //   - Nunca escreve em coleção financeira/de status do moviki-robo (Regra
 //     de Ouro #1 do Mapa Mestre — dinheiro é só Admin SDK do robô de
 //     cobrança) — só grava em atendimentos_bot/{telefone}, que tem regra de
@@ -68,7 +105,9 @@ async function lerCorpoCru(req) {
 
 function assinaturaValida(corpoCru, headerAssinatura) {
   const secret = process.env.WHATSAPP_APP_SECRET;
-  if (!secret) return true; // sem App Secret configurado: segue (loga aviso no chamador)
+  // 03/09/2026: NUNCA falhar aberto. Sem o App Secret cadastrado na Vercel,
+  // nenhuma chamada e aceita — e essa e justamente a tranca do stand-by.
+  if (!secret) return false;
   if (!headerAssinatura) return false;
   const esperado = 'sha256=' + crypto.createHmac('sha256', secret).update(corpoCru).digest('hex');
   try {
@@ -113,7 +152,20 @@ async function handleVerify(req, res) {
 // ---------------------------------------------------------------------------
 // POST — mensagem nova do WhatsApp.
 // ---------------------------------------------------------------------------
+// Stand-by: o robo so acorda quando as DUAS envs abaixo existem. Sem elas
+// nao ha como validar a origem (WHATSAPP_APP_SECRET) nem responder ao
+// cliente (WHATSAPP_TOKEN), entao o certo e nem comecar — e nao gastar
+// chamada de IA nenhuma. Esta e a tranca de que fala o cabecalho.
+function estaLigado() {
+  return !!process.env.WHATSAPP_APP_SECRET && !!process.env.WHATSAPP_TOKEN;
+}
+
 module.exports = async (req, res) => {
+  if (!estaLigado()) {
+    res.status(503).json({ ok: false, standby: true,
+      motivo: 'atendimento por WhatsApp desligado — quem atende e o PABX' });
+    return;
+  }
   if (req.method === 'GET') { await handleVerify(req, res); return; }
   if (req.method !== 'POST') { res.status(405).end(); return; }
 
