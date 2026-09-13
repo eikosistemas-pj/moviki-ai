@@ -58,6 +58,7 @@ const { montarSystemPrompt } = require('../lib/promptPainel');
 const { montarContexto } = require('../lib/contextoUsuario');
 const memoria = require('../lib/memoria');
 const { respostaSegura } = require('../lib/segurancaVik');
+const catalogo = require('../lib/catalogoPainel');
 
 const ORIGENS_PADRAO = [
   'https://app.moviki.com.br',
@@ -66,6 +67,45 @@ const ORIGENS_PADRAO = [
 ];
 const MAX_HISTORICO = 16;   // ~8 idas e vindas — o bastante para contexto
 const LIMITE_DIA_PADRAO = 40;
+
+// ------------------------------------------------------------------
+// DE QUAL PAINEL VEIO A PERGUNTA  (13/09/2026)
+// ------------------------------------------------------------------
+// A mesma caixa de mensagens existe no painel do lojista e no do parceiro, e
+// quem e as duas coisas ve a MESMA conversa nos dois. Ate 12/09 o robo nao
+// sabia de qual lado a pessoa estava falando e descrevia sempre o painel do
+// lojista — em 09/09 isso virou uma resposta em que ele ofereceu "Fotos" e
+// "Logo propria no pino" a um parceiro que perguntava do cracha.
+// Agora o painel manda dois campos no corpo do pedido:
+//   painel: 'lojista' | 'parceiro'   -> qual tela esta aberta
+//   versao: window.MOVIKI_VERSAO     -> a marca de versao daquele HTML
+// Nenhum dos dois e dado de confianca (vem do navegador) e nenhum precisa
+// ser: o pior que um valor forjado faz e o Vik descrever o painel errado
+// para quem mentiu. O uid continua vindo SO do token.
+// A marca de versao serve de detector de catalogo velho — ver
+// lib/catalogoPainel.js, funcao avisoVersao().
+
+/* Registra, no maximo uma vez por marca por instancia, que o painel esta mais
+   novo que o catalogo do Vik. Sem o cache seria uma escrita por mensagem. */
+const _marcasVistas = {};
+async function anotarPainelNovo(painel, marca) {
+  const chave = painel + '|' + marca;
+  if (_marcasVistas[chave]) return;
+  _marcasVistas[chave] = true;
+  console.error('[chat] CATALOGO DESATUALIZADO: painel ' + painel + ' esta em "' + marca +
+    '" e o catalogo do Vik foi escrito para "' + (catalogo.MARCAS_CONFERIDAS[painel] || '?') +
+    '". Atualize lib/catalogoPainel.js. Enquanto isso o Vik responde em modo cauteloso.');
+  try {
+    await db.collection('vik_status').doc('paineis').set({
+      [painel]: {
+        marcaNoAr: String(marca).slice(0, 60),
+        marcaNoCatalogo: catalogo.MARCAS_CONFERIDAS[painel] || '',
+        catalogoVersao: catalogo.CATALOGO_VERSAO,
+        vistoEm: admin.firestore.FieldValue.serverTimestamp(),
+      },
+    }, { merge: true });
+  } catch (e) { console.error('[chat] vik_status (ignorado):', e && e.message); }
+}
 
 // ------------------------------------------------------------------
 // PADRAO GLOBAL DO VIK  (28/08/2026)
@@ -252,16 +292,29 @@ module.exports = async function handler(req, res) {
     // Devolve o texto do contexto E o id da oferta que o lib/oportunidade.js
     // escolheu — o id precisa ser gravado junto com a resposta, senao um
     // "nao" da pessoa na mensagem seguinte nao teria a que se referir.
-    const ctx = await montarContexto(uid, eu.email);
+    // De qual painel veio a pergunta, e em que versao ele esta. Valor fora da
+    // lista vira vazio: nunca confie em texto do navegador para escolher
+    // caminho de codigo.
+    const painel = (corpo.painel === 'parceiro' || corpo.painel === 'lojista') ? corpo.painel : '';
+    const marca = String(corpo.versao || '').slice(0, 60);
+    if (painel && marca && catalogo.MARCAS_CONFERIDAS[painel] &&
+        marca !== catalogo.MARCAS_CONFERIDAS[painel]) {
+      await anotarPainelNovo(painel, marca);
+    }
+
+    const ctx = await montarContexto(uid, eu.email, { painel: painel });
     const contexto = ctx.texto;
     const ofertaId = ctx.ofertaId;
+    // O painel aberto manda; sem ele, vale o que a conta e (lojista, parceiro
+    // ou os dois). So assim o prompt recebe a descricao da tela CERTA.
+    const opcoesPrompt = { papel: painel || ctx.papel, painel: painel, marca: marca };
     const historico = msgs.slice(0, -1).map((m) => ({
       role: (m.de === 'lojista') ? 'user' : 'assistant',
       texto: String(m.texto || (m.arquivoNome ? '[enviou o arquivo ' + m.arquivoNome + ']' : '')).slice(0, 2000),
     })).filter((m) => m.texto);
 
     const resposta = await perguntarClaude({
-      systemPrompt: montarSystemPrompt(contexto),
+      systemPrompt: montarSystemPrompt(contexto, opcoesPrompt),
       historico: alternar(historico),
       mensagemNova: pergunta.slice(0, 2000),
     });
@@ -313,7 +366,7 @@ module.exports = async function handler(req, res) {
       // Custo: uma chamada extra APENAS quando barra. A funcao tem 30s.
       // ------------------------------------------------------------
       const resposta2 = await perguntarClaude({
-        systemPrompt: montarSystemPrompt(contexto) + '\n\n' + avisoCorretivo(conf.motivo),
+        systemPrompt: montarSystemPrompt(contexto, opcoesPrompt) + '\n\n' + avisoCorretivo(conf.motivo),
         historico: alternar(historico),
         mensagemNova: pergunta.slice(0, 2000),
       });
