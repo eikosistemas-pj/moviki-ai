@@ -87,8 +87,25 @@ const { perguntarClaude } = require('../lib/anthropic');
 const { enviarTextoWhatsapp } = require('../lib/whatsapp');
 const { SYSTEM_PROMPT } = require('../lib/promptAtendimento');
 const { respostaSegura } = require('../lib/segurancaVik');
+const { decidirTeto } = require('../lib/tetoDia');
 
 const MAX_HISTORICO = 24; // ~12 idas e vindas guardadas por conversa
+
+/* TETO DE USO POR TELEFONE, POR DIA — 17/09/2026
+   O Vik do painel ja tinha teto (CHAT_LIMITE_DIA); este, que fala com
+   DESCONHECIDO, nao tinha nenhum. A assinatura da Meta impede que alguem
+   forje chamada, mas nao impede uma pessoa real mandar mensagem sem parar:
+   cada uma e uma chamada paga a Anthropic, e a conta e do Paulo.
+   Ao estourar, o atendente nao some: manda UMA vez o caminho humano e, dali
+   em diante, fica calado ate a virada do dia (UTC). Uma resposta por
+   mensagem depois do teto sairia quase tao caro quanto responder. */
+const LIMITE_DIA_PADRAO = 30;
+
+function hoje() {
+  const d = new Date();
+  return d.getUTCFullYear() + '-' + ('0' + (d.getUTCMonth() + 1)).slice(-2) + '-' + ('0' + d.getUTCDate()).slice(-2);
+}
+
 
 // Corpo cru é necessário pra validar a assinatura da Meta (HMAC sobre os
 // bytes originais) — desliga o parser automático da Vercel pra esta rota.
@@ -221,6 +238,32 @@ module.exports = async (req, res) => {
 
     const historico = Array.isArray(conv.historico) ? conv.historico : [];
 
+    // --- TETO DE USO DO DIA ---
+    // Fica ANTES da chamada da IA de proposito: depois dela o dinheiro ja saiu.
+    const dia    = hoje();
+    const limite = Number(process.env.ATENDIMENTO_LIMITE_DIA || LIMITE_DIA_PADRAO);
+    const teto   = decidirTeto(conv, dia, limite);
+    const usadas = teto.usadas;
+
+    if (teto.bloquear) {
+      if (teto.avisar) {
+        await enviarTextoWhatsapp(
+          telefone,
+          'Falei bastante por aqui hoje! Pra continuar agora, chama uma pessoa da equipe: ' +
+          'suporte@moviki.com.br ou wa.me/554120186848. Amanha eu volto a responder por aqui.'
+        );
+      }
+      await convRef.set({
+        botDia: dia,
+        botUsos: usadas,
+        botAvisoLimite: true,
+        mensagensProcessadas: jaProcessados.concat([msgId]).slice(-10),
+        atualizadoEm: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
+      res.status(200).json({ ok: true, pulado: 'limite_dia' });
+      return;
+    }
+
     const respostaIA = await perguntarClaude({
       systemPrompt: SYSTEM_PROMPT,
       historico,
@@ -256,6 +299,9 @@ module.exports = async (req, res) => {
     await convRef.set({
       historico: novoHistorico,
       mensagensProcessadas: novosProcessados,
+      botDia: dia,
+      botUsos: usadas + 1,
+      botAvisoLimite: false,
       atualizadoEm: admin.firestore.FieldValue.serverTimestamp(),
       criadoEm: conv.criadoEm || admin.firestore.FieldValue.serverTimestamp(),
     }, { merge: true });

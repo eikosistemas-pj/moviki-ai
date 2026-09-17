@@ -5,5 +5,8 @@
   "description": "Atendente de IA da Moviki (WhatsApp, suporte + vendas, 24/7). Repo isolado do moviki-robo de proposito.",
   "dependencies": {
     "firebase-admin": "^12.7.0"
+  },
+  "scripts": {
+    "teste": "node --test lib/tetoDia.test.js lib/segurancaVik.test.js"
   }
 }
