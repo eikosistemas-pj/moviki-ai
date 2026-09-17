@@ -58,7 +58,7 @@ Este arquivo é lido pelo Claude Code no início de toda sessão. Ele vale para 
 - **Lojista escolhe um plano** → painel chama `moviki-robo /api/criar-assinatura` → Asaas gera a cobrança.
 - **Asaas avisa sozinho** quando o pagamento muda → `moviki-robo /api/webhook` → grava `ativo` em `assinaturas/{uid}` → recursos liberam ou caem para Básico.
 - **Visitante** abre `moviki.com.br/{slug}` → `moviki /api/og` monta a página do negócio.
-- **Cliente manda mensagem no WhatsApp** → `moviki-ai /api/atendimento` (não sabe quem está falando, só conhece o catálogo).
+- **Cliente manda mensagem no WhatsApp** → `moviki-ai /api/atendimento` (não sabe quem está falando, só conhece o catálogo). **Teto de 30 mensagens por telefone por dia** (`ATENDIMENTO_LIMITE_DIA` no Vercel). Ao estourar, manda uma vez o caminho humano e fica calado até a virada do dia (UTC).
 - **Lojista usa a caixa de mensagens do painel** → `moviki-ai /api/chat` (sabe quem está falando, lê os dados reais da conta).
 - **Rotinas de rede social** → `moviki-assistente-social` roda por Actions, lê `negocios` e publica.
 
