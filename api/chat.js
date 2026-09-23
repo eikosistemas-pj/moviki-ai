@@ -171,7 +171,7 @@ function cors(req, res) {
     res.setHeader('Access-Control-Allow-Origin', origem);
     res.setHeader('Vary', 'Origin');
   }
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   res.setHeader('Access-Control-Max-Age', '86400');
 }
@@ -202,6 +202,14 @@ async function quemEstaFalando(req) {
 module.exports = async function handler(req, res) {
   cors(req, res);
   if (req.method === 'OPTIONS') return res.status(204).end();
+  /* GET publico (23/09/2026): so as marcas que o catalogo do Vik conhece.
+     O painel do dono compara com a marca no ar do index.html e do
+     parceiro.html e acende "Precisa de voce" quando divergem — o modo
+     cauteloso deixou de ser silencioso. Nao ha dado de ninguem aqui. */
+  if (req.method === 'GET') {
+    res.setHeader('Cache-Control', 'no-store');
+    return res.status(200).json({ ok: true, catalogo: catalogo.CATALOGO_VERSAO, marcas: catalogo.MARCAS_CONFERIDAS });
+  }
   if (req.method !== 'POST') return res.status(405).json({ ok: false, erro: 'metodo' });
 
   try {
