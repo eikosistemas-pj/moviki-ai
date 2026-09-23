@@ -241,7 +241,8 @@ module.exports = async (req, res) => {
     // --- TETO DE USO DO DIA ---
     // Fica ANTES da chamada da IA de proposito: depois dela o dinheiro ja saiu.
     const dia    = hoje();
-    const limite = Number(process.env.ATENDIMENTO_LIMITE_DIA || LIMITE_DIA_PADRAO);
+    const limiteEnv = Number(process.env.ATENDIMENTO_LIMITE_DIA);
+    const limite = (Number.isFinite(limiteEnv) && limiteEnv > 0) ? limiteEnv : LIMITE_DIA_PADRAO;  // 23/09: valor invalido na env nao desliga mais o teto
     const teto   = decidirTeto(conv, dia, limite);
     const usadas = teto.usadas;
 

@@ -256,7 +256,8 @@ module.exports = async function handler(req, res) {
 
     // Teto de uso por conta/dia. Zera sozinho na virada do dia (UTC).
     const dia = hoje();
-    const limite = Number(process.env.CHAT_LIMITE_DIA || LIMITE_DIA_PADRAO);
+    const limiteEnv = Number(process.env.CHAT_LIMITE_DIA);
+    const limite = (Number.isFinite(limiteEnv) && limiteEnv > 0) ? limiteEnv : LIMITE_DIA_PADRAO;  // 23/09: valor invalido na env nao desliga mais o teto
     const usadas = (conv.botDia === dia) ? (Number(conv.botUsos) || 0) : 0;
     if (usadas >= limite) return res.status(200).json({ ok: true, pulado: 'limite_dia' });
 
@@ -287,6 +288,26 @@ module.exports = async function handler(req, res) {
     // IDEMPOTENCIA: dois cliques, dois deploys ou um retry do navegador nao
     // podem gerar duas respostas para a mesma mensagem.
     if (conv.botRespondeuAte === ultima.id) return res.status(200).json({ ok: true, pulado: 'ja_respondida' });
+
+    /* RESERVA ATOMICA — 23/09/2026 (varredura de seguranca). O teto do dia e a
+       trava "mensagem ja respondida" eram lidos SEM transacao: N chamadas
+       simultaneas para a mesma mensagem passavam todas pelas duas checagens e
+       viravam N chamadas pagas a Anthropic, com o contador subindo so 1.
+       Agora, antes de chamar a IA, cada chamada tenta RESERVAR a vaga numa
+       transacao em vik_reserva/{uid} (so o Admin SDK escreve; sem regra no
+       Firestore, o navegador nao alcanca). Uma passa; as outras voltam
+       "em_andamento". A reserva vence em 90 s se a funcao morrer no meio. */
+    const reservaRef = db.collection('vik_reserva').doc(uid);
+    const reserva = await db.runTransaction(async (t) => {
+      const rs = await t.get(reservaRef);
+      const r = rs.exists ? (rs.data() || {}) : {};
+      if (r.msg === ultima.id && (r.respondida === true || (Number(r.em) || 0) > Date.now() - 90000)) return 'em_andamento';
+      const usos = (r.dia === dia) ? (Number(r.usos) || 0) : 0;
+      if (usos >= limite) return 'limite_dia';
+      t.set(reservaRef, { msg: ultima.id, em: Date.now(), dia, usos: usos + 1, respondida: false });
+      return 'ok';
+    });
+    if (reserva !== 'ok') return res.status(200).json({ ok: true, pulado: reserva });
 
     // Mensagem so com anexo e sem texto: nao ha o que interpretar, e o robo
     // nao le documento. Passa para o time.
@@ -481,5 +502,7 @@ async function gravarResposta(convRef, uid, msgId, dia, usadas, texto, filtroMot
     conv.botFiltros = admin.firestore.FieldValue.increment(1);
   }
   lote.set(convRef, conv, { merge: true });
+  // 23/09: fecha a reserva desta mensagem (ver RESERVA ATOMICA no handler).
+  lote.set(db.collection('vik_reserva').doc(uid), { respondida: true }, { merge: true });
   await lote.commit();
 }
