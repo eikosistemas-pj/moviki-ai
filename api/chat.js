@@ -307,7 +307,10 @@ module.exports = async function handler(req, res) {
     const ofertaId = ctx.ofertaId;
     // O painel aberto manda; sem ele, vale o que a conta e (lojista, parceiro
     // ou os dois). So assim o prompt recebe a descricao da tela CERTA.
-    const opcoesPrompt = { papel: painel || ctx.papel, painel: painel, marca: marca };
+    // criador: so vale no lado parceiro — no painel do lojista o bloco da
+    // Area do criador seria tela errada para a pessoa (22/09/2026).
+    const opcoesPrompt = { papel: painel || ctx.papel, painel: painel, marca: marca,
+                           criador: !!ctx.criador && painel !== 'lojista' };
     const historico = msgs.slice(0, -1).map((m) => ({
       role: (m.de === 'lojista') ? 'user' : 'assistant',
       texto: String(m.texto || (m.arquivoNome ? '[enviou o arquivo ' + m.arquivoNome + ']' : '')).slice(0, 2000),
