@@ -67,6 +67,23 @@ const ORIGENS_PADRAO = [
 ];
 const MAX_HISTORICO = 16;   // ~8 idas e vindas — o bastante para contexto
 const LIMITE_DIA_PADRAO = 40;
+/* 25/09/2026 (varredura pre-lancamento): conta com e-mail NAO confirmado tem
+   teto baixo (so para tirar duvida de cadastro), a conta precisa ter cadastro
+   de lojista ou de parceiro, e existe um teto GLOBAL de respostas por dia
+   (env VIK_TETO_GLOBAL_DIA). Sem isso, contas descartaveis esgotavam a trava
+   de gasto da Anthropic e o Vik E o WhatsApp ficavam mudos para todo mundo. */
+const LIMITE_DIA_SEM_EMAIL = 5;
+const TETO_GLOBAL_PADRAO = 1500;
+async function avisarTelegram(texto) {
+  const TOKEN = process.env.TELEGRAM_TOKEN, CHAT = process.env.TELEGRAM_CHAT_ID;
+  if (!TOKEN || !CHAT || typeof fetch !== 'function') return;
+  try {
+    await fetch('https://api.telegram.org/bot' + TOKEN + '/sendMessage', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: CHAT, text: String(texto).slice(0, 3500) }),
+    });
+  } catch (_) {}
+}
 
 // ------------------------------------------------------------------
 // DE QUAL PAINEL VEIO A PERGUNTA  (13/09/2026)
@@ -244,6 +261,19 @@ module.exports = async function handler(req, res) {
     const convRef = db.collection('conversas').doc(uid);
     const convSnap = await convRef.get();
     if (!convSnap.exists) return res.status(200).json({ ok: true, pulado: 'sem_conversa' });
+
+    // So quem tem cadastro de lojista ou de parceiro conversa com o Vik.
+    const [negSnap, parSnap] = await Promise.all([
+      db.collection('negocios').doc(uid).get(),
+      db.collection('parceiros').doc(uid).get(),
+    ]);
+    if (!negSnap.exists && !parSnap.exists) return res.status(200).json({ ok: true, pulado: 'sem_cadastro' });
+
+    // E-mail confirmado? O token vale 1 h: se diz "nao", pergunta ao Auth.
+    let emailOk = eu.emailVerificado;
+    if (!emailOk) {
+      try { const u = await admin.auth().getUser(uid); emailOk = !!(u && u.emailVerified); } catch (_) { emailOk = false; }
+    }
     const conv = convSnap.data() || {};
 
     // Trava por conversa, com padrao global por tras. Ver o bloco PADRAO
@@ -257,7 +287,10 @@ module.exports = async function handler(req, res) {
     // Teto de uso por conta/dia. Zera sozinho na virada do dia (UTC).
     const dia = hoje();
     const limiteEnv = Number(process.env.CHAT_LIMITE_DIA);
-    const limite = (Number.isFinite(limiteEnv) && limiteEnv > 0) ? limiteEnv : LIMITE_DIA_PADRAO;  // 23/09: valor invalido na env nao desliga mais o teto
+    const limiteConta = (Number.isFinite(limiteEnv) && limiteEnv > 0) ? limiteEnv : LIMITE_DIA_PADRAO;  // 23/09: valor invalido na env nao desliga mais o teto
+    const limite = emailOk ? limiteConta : Math.min(limiteConta, LIMITE_DIA_SEM_EMAIL);
+    const tetoEnv = Number(process.env.VIK_TETO_GLOBAL_DIA);
+    const tetoGlobal = (Number.isFinite(tetoEnv) && tetoEnv > 0) ? tetoEnv : TETO_GLOBAL_PADRAO;
     const usadas = (conv.botDia === dia) ? (Number(conv.botUsos) || 0) : 0;
     if (usadas >= limite) return res.status(200).json({ ok: true, pulado: 'limite_dia' });
 
@@ -298,15 +331,27 @@ module.exports = async function handler(req, res) {
        Firestore, o navegador nao alcanca). Uma passa; as outras voltam
        "em_andamento". A reserva vence em 90 s se a funcao morrer no meio. */
     const reservaRef = db.collection('vik_reserva').doc(uid);
+    const globalRef = db.collection('vik_reserva').doc('_global');
+    let avisarTeto = false;
     const reserva = await db.runTransaction(async (t) => {
-      const rs = await t.get(reservaRef);
+      const [rs, gs] = await Promise.all([t.get(reservaRef), t.get(globalRef)]);
       const r = rs.exists ? (rs.data() || {}) : {};
+      const g = gs.exists ? (gs.data() || {}) : {};
       if (r.msg === ultima.id && (r.respondida === true || (Number(r.em) || 0) > Date.now() - 90000)) return 'em_andamento';
       const usos = (r.dia === dia) ? (Number(r.usos) || 0) : 0;
       if (usos >= limite) return 'limite_dia';
+      const usosG = (g.dia === dia) ? (Number(g.usos) || 0) : 0;
+      if (usosG >= tetoGlobal) {
+        if (g.avisadoDia !== dia) { avisarTeto = true; t.set(globalRef, { dia, usos: usosG, avisadoDia: dia }); }
+        return 'teto_global';
+      }
       t.set(reservaRef, { msg: ultima.id, em: Date.now(), dia, usos: usos + 1, respondida: false });
+      t.set(globalRef, { dia, usos: usosG + 1, avisadoDia: g.avisadoDia || '' });
       return 'ok';
     });
+    if (avisarTeto) {
+      await avisarTelegram('⚠️ Vik: o teto global de ' + tetoGlobal + ' respostas por dia foi atingido. O Vik parou de responder até a virada do dia (UTC). Se for uso legítimo, suba VIK_TETO_GLOBAL_DIA na Vercel do moviki-ai; se não, confira as contas novas no painel do dono.');
+    }
     if (reserva !== 'ok') return res.status(200).json({ ok: true, pulado: reserva });
 
     // Mensagem so com anexo e sem texto: nao ha o que interpretar, e o robo
