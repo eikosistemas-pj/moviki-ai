@@ -1,4 +1,8 @@
-// api/chat.js  (repo: moviki-ai)
+// api/chat.js  (repo: moviki-ai) | 06/10/2026 donogoogle
+//
+// 06/10/2026 (seguranca, plano de acao 1.1): ligar/desligar o Vik para todos
+// (vik_padrao) so com sessao do dono aberta pelo GOOGLE (lib/admin.js, a
+// mesma regra do robo). Antes bastava o dono entrar por senha.
 //
 // Atendente de IA da caixa de mensagens do PAINEL (lojista e parceiro).
 // Vive aqui, e nao no moviki-robo, porque o robo do dinheiro esta no teto de
@@ -53,6 +57,7 @@
 //   CHAT_LIMITE_DIA           -> opcional. Padrao 40 respostas por conta/dia.
 
 const { admin, db } = require('../lib/firebase');
+const { conferirAdmin } = require('../lib/admin');
 const { perguntarClaude } = require('../lib/anthropic');
 const { montarSystemPrompt } = require('../lib/promptPainel');
 const { montarContexto } = require('../lib/contextoUsuario');
@@ -162,17 +167,9 @@ async function padraoVik() {
   }
 }
 
-/* So o dono muda o padrao. isAdmin aqui e a MESMA verdade da regra do
-   Firestore: existir o documento admins/{uid}. Nao ha lista de uid no codigo
-   nem env com uid — se houvesse, teriam duas fontes de verdade para a mesma
-   pergunta, e um dia elas discordariam. */
-async function ehAdmin(uid) {
-  try {
-    const d = await db.collection('admins').doc(uid).get();
-    return d.exists === true;
-  } catch (e) { return false; }
-}
-
+/* 06/10/2026: a checagem de dono (vik_padrao) mora em lib/admin.js: documento
+   admins/{uid} E sessao aberta pelo Google. A funcao ehAdmin local saiu para
+   ninguem reaproveitar a checagem antiga, que aceitava senha. */
 function origensLiberadas() {
   const env = String(process.env.CHAT_ORIGENS || '').trim();
   if (!env) return ORIGENS_PADRAO;
@@ -209,7 +206,7 @@ async function quemEstaFalando(req) {
   if (!t) return null;
   try {
     const dec = await admin.auth().verifyIdToken(t);
-    return { uid: dec.uid, email: dec.email || '', emailVerificado: dec.email_verified === true };
+    return { uid: dec.uid, email: dec.email || '', emailVerificado: dec.email_verified === true, dec };
   } catch (e) {
     console.error('[chat] token invalido:', e && e.message);
     return null;
@@ -248,7 +245,8 @@ module.exports = async function handler(req, res) {
     // --------------------------------------------------------------
     const corpo = (req.body && typeof req.body === 'object') ? req.body : {};
     if (corpo.acao === 'vik_padrao') {
-      if (!(await ehAdmin(uid))) return res.status(403).json({ ok: false, erro: 'nao_admin' });
+      const adm = await conferirAdmin(db, eu.dec);
+      if (!adm.ok) return res.status(adm.status).json({ ok: false, erro: adm.erro, mensagem: adm.mensagem });
       const ligado = corpo.ligado === true;
       await db.collection('configuracoes').doc('sistema')
         .set({ vikPadraoLigado: ligado }, { merge: true });
