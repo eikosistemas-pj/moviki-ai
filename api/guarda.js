@@ -1,4 +1,11 @@
-// api/guarda.js  (repo: moviki-ai)  — marca 2026-09-28-guarda1
+// api/guarda.js  (repo: moviki-ai)  — marca 2026-10-06-donogoogle (antes 2026-09-28-guarda1)
+//
+// 06/10/2026 (seguranca, plano de acao 1.1): as acoes adm_* (banir,
+// congelar, liberar, isentar, configurar e ver a conta de qualquer um) so
+// com sessao do dono aberta pelo GOOGLE, pela mesma lib/admin.js do robo.
+// O guarda.html ganhou o botao do Google em 03/10, mas este servidor ainda
+// aceitava o dono por senha. Quem e isento e quem e alvo protegido continua
+// sendo so o documento admins/{uid}.
 //
 // GUARDA ANTICLONAGEM — o servidor.
 //
@@ -42,6 +49,7 @@
 
 const { admin, db } = require('../lib/firebase');
 const G = require('../lib/guardaPontos');
+const { conferirAdmin } = require('../lib/admin');
 
 const VERSAO = G.VERSAO;
 const PAINEL_URL = 'https://app.moviki.com.br/guarda.html';
@@ -373,7 +381,8 @@ module.exports = async function handler(req, res) {
 
   try {
     if (acao.indexOf('adm_') === 0) {
-      if (!(await ehAdmin(uid))) return res.status(403).json({ erro: 'nao_admin' });
+      const adm = await conferirAdmin(db, dec);
+      if (!adm.ok) return res.status(adm.status).json({ erro: adm.erro, mensagem: adm.mensagem });
       if (acao === 'adm_lista') return res.status(200).json(Object.assign({ cfg: await lerCfg(), versao: VERSAO }, await admLista()));
       if (acao === 'adm_conta') return res.status(200).json(await admConta(String(b.uid || '')));
       if (acao === 'adm_acao') return res.status(200).json(await admAcao(uid, String(b.uid || ''), String(b.tipo || ''), b.nota));
