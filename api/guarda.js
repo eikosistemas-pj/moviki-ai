@@ -1,4 +1,4 @@
-// api/guarda.js  (repo: moviki-ai)  — marca 2026-10-06-donogoogle (antes 2026-09-28-guarda1)
+// api/guarda.js  (repo: moviki-ai)  — marca 2026-10-06-revogada (antes 2026-10-06-donogoogle)
 //
 // 06/10/2026 (seguranca, plano de acao 1.1): as acoes adm_* (banir,
 // congelar, liberar, isentar, configurar e ver a conta de qualquer um) so
@@ -118,10 +118,14 @@ async function lerCfg() {
   }
 }
 
-async function tokenDe(b) {
+/* 06/10 (plano 2.3): acao de dono (adm_*) confere tambem se a sessao foi
+   cancelada (checkRevoked). status/sinais, que todo painel chama a cada
+   carga, continuam sem essa leitura extra: travar = desativar o login, que
+   derruba o token na proxima hora de qualquer jeito. */
+async function tokenDe(b, exigirViva) {
   const t = typeof b.t === 'string' ? b.t : '';
   if (!t || t.length > 4096) return null;
-  try { return await admin.auth().verifyIdToken(t); } catch (_) { return null; }
+  try { return await admin.auth().verifyIdToken(t, exigirViva === true); } catch (_) { return null; }
 }
 async function ehAdmin(uid) {
   try { return (await db.collection('admins').doc(uid).get()).exists; } catch (_) { return false; }
@@ -375,7 +379,7 @@ module.exports = async function handler(req, res) {
 
   const b = corpo(req);
   const acao = String(b.acao || '');
-  const dec = await tokenDe(b);
+  const dec = await tokenDe(b, acao.indexOf('adm_') === 0);
   if (!dec || !dec.uid) return res.status(401).json({ erro: 'token' });
   const uid = dec.uid;
 
