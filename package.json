@@ -7,6 +7,6 @@
     "firebase-admin": "12.7.0"
   },
   "scripts": {
-    "teste": "node --test lib/tetoDia.test.js lib/segurancaVik.test.js lib/guardaPontos.test.js lib/admin.test.js"
+    "teste": "node --test lib/tetoDia.test.js lib/segurancaVik.test.js lib/guardaPontos.test.js lib/admin.test.js lib/vikDirect.test.js"
   }
 }
