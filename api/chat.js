@@ -1,4 +1,11 @@
-// api/chat.js  (repo: moviki-ai) | 06/10/2026 donogoogle
+// api/chat.js  (repo: moviki-ai) | 16/10/2026 vikqueda
+//
+// 16/10/2026 (vikqueda): o Vik NUNCA MAIS fica mudo. Toda saida que deixava
+// a pergunta da pessoa sem resposta (teto do dia, teto global, IA fora do ar,
+// resposta vazia, erro interno) grava uma resposta pronta que leva a pessoa
+// ao lugar certo do painel e acende o aviso do dono (botFiltro). Teto de quem
+// nao confirmou o e-mail subiu de 5 para 20: desde 14/10 o teste comeca sem
+// confirmar, e a trava cortava justamente o lojista novo. Ver lib/vikQueda.js.
 //
 // 06/10/2026 (seguranca, plano de acao 1.1): ligar/desligar o Vik para todos
 // (vik_padrao) so com sessao do dono aberta pelo GOOGLE (lib/admin.js, a
@@ -64,6 +71,7 @@ const { montarContexto } = require('../lib/contextoUsuario');
 const memoria = require('../lib/memoria');
 const { respostaSegura } = require('../lib/segurancaVik');
 const catalogo = require('../lib/catalogoPainel');
+const queda = require('../lib/vikQueda');
 
 const ORIGENS_PADRAO = [
   'https://app.moviki.com.br',
@@ -77,7 +85,14 @@ const LIMITE_DIA_PADRAO = 40;
    de lojista ou de parceiro, e existe um teto GLOBAL de respostas por dia
    (env VIK_TETO_GLOBAL_DIA). Sem isso, contas descartaveis esgotavam a trava
    de gasto da Anthropic e o Vik E o WhatsApp ficavam mudos para todo mundo. */
-const LIMITE_DIA_SEM_EMAIL = 5;
+/* 16/10/2026: 5 -> 20. Desde 14/10 o teste gratis comeca sem confirmar o
+   e-mail, entao quem esta sem confirmar e lojista novo de verdade, no momento
+   em que mais pergunta. Com 5, uma conversa normal sobre a primeira live
+   batia o teto (15/10, JSYoucloset). 20 respostas do modelo de atendimento
+   custam centavos; o teto global (TETO_GLOBAL_PADRAO) continua segurando
+   conta descartavel em massa. Ao bater, a resposta pronta pede a confirmacao
+   — que e tambem o que libera a live aberta. */
+const LIMITE_DIA_SEM_EMAIL = 20;
 const TETO_GLOBAL_PADRAO = 1500;
 async function avisarTelegram(texto) {
   const TOKEN = process.env.TELEGRAM_TOKEN, CHAT = process.env.TELEGRAM_CHAT_ID;
@@ -226,6 +241,11 @@ module.exports = async function handler(req, res) {
   }
   if (req.method !== 'POST') return res.status(405).json({ ok: false, erro: 'metodo' });
 
+  /* 16/10: o que a resposta pronta precisa saber, preenchido a medida que o
+     handler avanca. O catch final usa para nao deixar a pessoa sem resposta
+     nem quando algo quebra no meio. */
+  const q = { convRef: null, uid: '', conv: null, ultima: null, msgs: [], dia: '', usadas: 0, emailOk: true, painel: '' };
+
   try {
     const eu = await quemEstaFalando(req);
     if (!eu) return res.status(401).json({ ok: false, erro: 'nao_autenticado' });
@@ -244,6 +264,10 @@ module.exports = async function handler(req, res) {
     // SDK, que ignora regras, nada precisa ser republicado.
     // --------------------------------------------------------------
     const corpo = (req.body && typeof req.body === 'object') ? req.body : {};
+    // De qual painel veio a pergunta. Valor fora da lista vira vazio: nunca
+    // confie em texto do navegador para escolher caminho de codigo.
+    const painel = (corpo.painel === 'parceiro' || corpo.painel === 'lojista') ? corpo.painel : '';
+    q.painel = painel;
     if (corpo.acao === 'vik_padrao') {
       const adm = await conferirAdmin(db, eu.dec);
       if (!adm.ok) return res.status(adm.status).json({ ok: false, erro: adm.erro, mensagem: adm.mensagem });
@@ -290,7 +314,10 @@ module.exports = async function handler(req, res) {
     const tetoEnv = Number(process.env.VIK_TETO_GLOBAL_DIA);
     const tetoGlobal = (Number.isFinite(tetoEnv) && tetoEnv > 0) ? tetoEnv : TETO_GLOBAL_PADRAO;
     const usadas = (conv.botDia === dia) ? (Number(conv.botUsos) || 0) : 0;
-    if (usadas >= limite) return res.status(200).json({ ok: true, pulado: 'limite_dia' });
+    // 16/10: o teto NAO sai mais calado aqui. Ele e conferido depois de ler as
+    // mensagens, para a resposta pronta saber o assunto e a mensagem certa.
+    const tetoBatido = usadas >= limite;
+    Object.assign(q, { convRef, uid, conv, dia, usadas, emailOk });
 
     // Historico: as ultimas MAX_HISTORICO mensagens, em ordem. Vem em ordem
     // decrescente e e invertido aqui — 'desc' + limit pega as ULTIMAS; com
@@ -303,6 +330,7 @@ module.exports = async function handler(req, res) {
     if (!msgs.length) return res.status(200).json({ ok: true, pulado: 'sem_mensagem' });
 
     const ultima = msgs[msgs.length - 1];
+    q.msgs = msgs; q.ultima = ultima;
 
     // O robo so responde a pessoa. Se a ultima e do admin ou dele mesmo,
     // nao ha o que responder.
@@ -319,6 +347,9 @@ module.exports = async function handler(req, res) {
     // IDEMPOTENCIA: dois cliques, dois deploys ou um retry do navegador nao
     // podem gerar duas respostas para a mesma mensagem.
     if (conv.botRespondeuAte === ultima.id) return res.status(200).json({ ok: true, pulado: 'ja_respondida' });
+
+    // Teto do dia batido: resposta pronta (sem IA) em vez de silencio.
+    if (tetoBatido) return responderQueda(res, q, emailOk ? 'limite_dia' : 'limite_sem_email');
 
     /* RESERVA ATOMICA — 23/09/2026 (varredura de seguranca). O teto do dia e a
        trava "mensagem ja respondida" eram lidos SEM transacao: N chamadas
@@ -350,6 +381,10 @@ module.exports = async function handler(req, res) {
     if (avisarTeto) {
       await avisarTelegram('⚠️ Vik: o teto global de ' + tetoGlobal + ' respostas por dia foi atingido. O Vik parou de responder até a virada do dia (UTC). Se for uso legítimo, suba VIK_TETO_GLOBAL_DIA na Vercel do moviki-ai; se não, confira as contas novas no painel do dono.');
     }
+    // em_andamento = outra chamada ja esta respondendo esta mesma mensagem:
+    // ai sim o silencio e o certo. Teto (da conta ou global) vira resposta pronta.
+    if (reserva === 'limite_dia') return responderQueda(res, q, emailOk ? 'limite_dia' : 'limite_sem_email');
+    if (reserva === 'teto_global') return responderQueda(res, q, 'teto_global');
     if (reserva !== 'ok') return res.status(200).json({ ok: true, pulado: reserva });
 
     // Mensagem so com anexo e sem texto: nao ha o que interpretar, e o robo
@@ -367,7 +402,6 @@ module.exports = async function handler(req, res) {
     // De qual painel veio a pergunta, e em que versao ele esta. Valor fora da
     // lista vira vazio: nunca confie em texto do navegador para escolher
     // caminho de codigo.
-    const painel = (corpo.painel === 'parceiro' || corpo.painel === 'lojista') ? corpo.painel : '';
     const marca = String(corpo.versao || '').slice(0, 60);
     if (painel && marca && catalogo.MARCAS_CONFERIDAS[painel] &&
         marca !== catalogo.MARCAS_CONFERIDAS[painel]) {
@@ -397,19 +431,20 @@ module.exports = async function handler(req, res) {
     // Sem resposta da IA (chave, cota, timeout): NAO grava nada e nao mente
     // pro painel. O lojista continua vendo a propria mensagem enviada e o
     // time responde depois — que e exatamente o comportamento de antes.
-    if (!resposta) return res.status(200).json({ ok: false, erro: 'ia_indisponivel' });
+    if (!resposta) return responderQueda(res, q, 'ia_indisponivel');
 
     // O Vik responde e, no MESMO texto, acrescenta no fim um bloco marcado
     // com o que aprendeu. Aqui o bloco e arrancado antes de qualquer coisa:
     // limparResposta() corta a partir do marcador de abertura mesmo que o
     // bloco esteja malformado ou sem fechamento. Perder um aprendizado e
     // barato; mostrar tripa de prompt para o lojista, nao.
-    const limpa = memoria.limparResposta(resposta);
+    // 16/10: limparFormatacao tira **negrito**/# que o painel mostraria cru.
+    const limpa = queda.limparFormatacao(memoria.limparResposta(resposta));
     const aprendido = memoria.extrairAprendizado(resposta);
 
     // Resposta que sobrou vazia depois da limpeza = a IA mandou so o bloco.
     // Melhor nao gravar nada do que gravar bolha em branco.
-    if (!limpa) return res.status(200).json({ ok: false, erro: 'resposta_vazia' });
+    if (!limpa) return responderQueda(res, q, 'resposta_vazia');
 
     // ----------------------------------------------------------------
     // SEGUNDA CAMADA DE CONFORMIDADE — o filtro do servidor.
@@ -445,7 +480,7 @@ module.exports = async function handler(req, res) {
         historico: alternar(historico),
         mensagemNova: pergunta.slice(0, 2000),
       });
-      const limpa2 = resposta2 ? memoria.limparResposta(resposta2) : '';
+      const limpa2 = resposta2 ? queda.limparFormatacao(memoria.limparResposta(resposta2)) : '';
       const conf2 = limpa2 ? respostaSegura(limpa2) : { ok: false, motivo: 'ia_indisponivel' };
 
       if (conf2.ok) {
@@ -472,11 +507,47 @@ module.exports = async function handler(req, res) {
     return res.status(200).json({ ok: true, resposta: 'gravada' });
   } catch (e) {
     console.error('[chat] erro:', e);
+    // 16/10: se ja se sabe de quem e a conversa e qual a mensagem, a pessoa
+    // recebe a resposta pronta e o dono o aviso — em vez de silencio.
+    if (q.convRef && q.ultima) {
+      try { return await responderQueda(res, q, 'erro_interno'); }
+      catch (e2) { console.error('[chat] queda tambem falhou:', e2 && e2.message); }
+    }
     // 200 de proposito: o painel nao deve mostrar erro vermelho por causa do
     // robo. A mensagem da pessoa ja esta gravada e sera respondida por gente.
     return res.status(200).json({ ok: false, erro: 'interno' });
   }
 };
+
+/* RESPOSTA PRONTA (16/10/2026). Grava o texto de lib/vikQueda.js como de:'bot'
+   e acende o aviso do dono pelo botFiltro (o painel do dono mostra "o Vik foi
+   barrado aqui — responda voce", com toque e bipe). Nao chama a IA.
+   Teto: texto 1 vez por dia; as mensagens seguintes so reacendem o aviso.
+   Falha: texto a cada mensagem, menos se a ultima resposta ja foi uma queda.
+   Nenhum campo novo em conversas/{uid}: fora do hasOnly da regra, travaria a
+   caixa de mensagens inteira (incidente de 23/09). */
+async function responderQueda(res, q, motivo) {
+  const doBot = (q.msgs || []).filter((m) => m && m.de === 'bot');
+  const ultimaDoBot = doBot.length ? String(doBot[doBot.length - 1].texto || '') : '';
+  const escrever = queda.deveEscrever(q.conv, motivo, q.dia, ultimaDoBot);
+  console.error('[chat] QUEDA ' + motivo + ' uid=' + q.uid + (escrever ? ' (resposta pronta)' : ' (so aviso ao dono)'));
+  if (escrever) {
+    const texto = queda.textoQueda(motivo, {
+      pergunta: queda.assuntoRecente(q.msgs), emailOk: q.emailOk, painel: q.painel,
+    });
+    await gravarResposta(q.convRef, q.uid, q.ultima.id, q.dia, q.usadas, texto, motivo);
+    await avisarTelegram('Vik: ' + motivo.replace(/_/g, ' ') + ' na conversa de ' +
+      String((q.conv && (q.conv.nome || q.conv.email)) || q.uid).slice(0, 80) +
+      '. A pessoa recebeu a resposta pronta; responda no painel do dono > Mensagens.');
+  } else {
+    await q.convRef.set({
+      botFiltro: motivo,
+      botFiltroEm: admin.firestore.FieldValue.serverTimestamp(),
+      botRespondeuAte: q.ultima.id,
+    }, { merge: true });
+  }
+  return res.status(200).json({ ok: true, pulado: motivo, queda: escrever ? 'resposta_pronta' : 'so_aviso' });
+}
 
 /* Texto que entra na frente do prompt na SEGUNDA tentativa. Diz o que foi
    reprovado sem dizer como burlar: a lista e das PROIBICOES, nunca das
