@@ -1,4 +1,4 @@
-// api/atendimento.js  (repo: moviki-ai)
+// api/atendimento.js  (repo: moviki-ai)  versao 2026-10-23-token (verificacao do webhook em tempo constante)
 //
 // Atendente de IA do WhatsApp (suporte + vendas), 24/7. Repo isolado do
 // moviki-robo de propósito (20/08/2026): moviki-robo é o robô de DINHEIRO
@@ -153,13 +153,21 @@ async function avisarTelegramConversaNova(telefone, primeiraMsg) {
 // ---------------------------------------------------------------------------
 // GET — handshake de verificação do webhook (uma vez, no cadastro no Meta).
 // ---------------------------------------------------------------------------
+/* 23/10/2026 (Sentinela): comparacao em tempo constante, como a assinatura. */
+function tokenIgual(a, b) {
+  if (!a || !b) return false;
+  const x = crypto.createHash('sha256').update(String(a)).digest();
+  const y = crypto.createHash('sha256').update(String(b)).digest();
+  return crypto.timingSafeEqual(x, y);
+}
+
 async function handleVerify(req, res) {
   const q = req.query || {};
   const modo   = q['hub.mode'];
   const token  = q['hub.verify_token'];
   const desafio = q['hub.challenge'];
 
-  if (modo === 'subscribe' && token && token === process.env.WHATSAPP_VERIFY_TOKEN) {
+  if (modo === 'subscribe' && tokenIgual(token, process.env.WHATSAPP_VERIFY_TOKEN)) {
     res.status(200).send(String(desafio || ''));
     return;
   }
