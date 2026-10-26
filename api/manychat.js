@@ -1,4 +1,9 @@
-// api/manychat.js  (repo: moviki-ai)  versao 2026-10-26-semrepetir | 2026-10-26-contexto | antes 2026-10-09-direct
+// api/manychat.js  (repo: moviki-ai)  versao 2026-10-26-vendedor | antes 2026-10-26-semrepetir
+// 26/10/2026 (vendedor): o Vik pensa num rascunho <analise> que sai antes de
+// qualquer filtro; usa o ramo guardado da conversa quando o ManyChat nao
+// manda; audio/foto/figurinha recebem pedido de mensagem escrita (antes:
+// "Boa pergunta!"); resposta barrada por promessa ganha UMA reescrita quando
+// ainda ha tempo dentro dos 10 s do ManyChat. | antes 2026-10-09-direct
 // 26/10/2026 — "Perfeito" no direct virava "Estou pronto para atender...
 // Resumo do que tenho: ✅...". Agora: confirmacao curta responde com frase
 // fixa sem gastar IA; resposta que fala de si (resposta_meta no
@@ -45,11 +50,18 @@ const V = require('../lib/vikDirect');
 
 const MAX_HISTORICO = 12;
 const TIMEOUT_IA_MS = 7500; // o ManyChat desiste da chamada em 10 s
+const PRAZO_TOTAL_MS = 9000; // margem para gravar e responder antes dos 10 s
+const MAX_TOKENS = 500;      // rascunho <analise> (~60) + mensagem (~250)
 const RETENCAO_DIAS = 30;
 
+// Vale para erro, teto e resposta barrada: nao pode soar como resposta a uma
+// pergunta (antes comecava com "Boa pergunta!", ate para um "ok").
 const FRASE_PESSOA =
-  'Boa pergunta! Vou passar para a equipe e uma pessoa te responde aqui mesmo. ' +
-  'Enquanto isso, dá uma olhada na live de exemplo do seu ramo no botão abaixo.';
+  'Vou chamar alguém da equipe para te responder aqui mesmo. ' +
+  'Enquanto isso, a live de exemplo do seu ramo está no botão abaixo.';
+const FRASE_SEM_TEXTO =
+  'Por aqui eu consigo ler só mensagem escrita. Me conta em uma frase o que você vende ' +
+  'que eu te mostro como fica a live do seu ramo.';
 
 function hoje() {
   const d = new Date();
@@ -88,9 +100,13 @@ module.exports = async (req, res) => {
   let corpo = req.body;
   if (typeof corpo === 'string') { try { corpo = JSON.parse(corpo); } catch (_) { corpo = {}; } }
   const { contato, texto, ramo } = V.lerEntrada(corpo);
+  const etapas = V.lerEtapas(corpo);
+  const inicio = Date.now();
 
-  // Sem contato ou sem texto (figurinha, audio, reacao): nada para a IA ler.
-  if (!contato || !texto) { responder(res, FRASE_PESSOA, { pulado: 'sem_texto' }); return; }
+  // Sem contato: nada a fazer. Sem texto (audio, foto, figurinha, video): pede
+  // a mensagem escrita, sem IA.
+  if (!contato) { responder(res, FRASE_PESSOA, { pulado: 'sem_contato' }); return; }
+  if (V.ehSemTexto(texto)) { responder(res, FRASE_SEM_TEXTO, { pulado: 'sem_texto' }); return; }
 
   try {
     // Confirmacao curta ("perfeito", "ok", "obrigada", emoji): resposta fixa,
@@ -148,23 +164,46 @@ module.exports = async (req, res) => {
 
     const ehMeta = function (t) { const c = respostaSegura(t); return !c.ok && c.motivo === 'resposta_meta'; };
     const historico = V.limparHistorico(conv.historico, ehMeta);
-    const bruta = await perguntarClaude({
-      systemPrompt: V.montarPrompt(ramo),
+    // O ramo que o ManyChat nao mandou nesta chamada pode estar guardado da
+    // conversa (antes era ignorado e o Vik perguntava o ramo de novo).
+    const ramoUsado = ramo || conv.ramo || '';
+    const systemPrompt = V.montarPrompt(ramoUsado, etapas);
+    const bruta = V.separarAnalise(await perguntarClaude({
+      systemPrompt,
       historico,
       mensagemNova: texto,
-      maxTokens: 350,
+      maxTokens: MAX_TOKENS,
       timeoutMs: TIMEOUT_IA_MS,
-    });
+    }));
 
     if (!bruta) { responder(res, FRASE_PESSOA, { pulado: 'ia_sem_resposta' }); return; }
 
     // Mesmo filtro de conformidade do Vik do painel e do WhatsApp: promessa
     // de ganho por escrito, no direct, vira print e restricao de anuncio.
-    const conf = respostaSegura(bruta, FRASE_PESSOA);
+    let conf = respostaSegura(bruta, FRASE_PESSOA);
+    let final = bruta;
     if (!conf.ok) console.error('[manychat] resposta BARRADA (' + conf.motivo + ') trecho="' + (conf.trecho || '') + '"');
+
+    // Barrada por promessa ou garantia: UMA reescrita, so se ainda couber no
+    // prazo do ManyChat. Barrar direto mandaria um lead quente para "alguem da
+    // equipe" por causa de uma frase.
+    const restante = PRAZO_TOTAL_MS - (Date.now() - inicio);
+    if (!conf.ok && conf.motivo !== 'resposta_meta' && restante > 3500) {
+      const bruta2 = V.separarAnalise(await perguntarClaude({
+        systemPrompt: systemPrompt + '\n\n' + V.avisoReescrita(conf.motivo),
+        historico,
+        mensagemNova: texto,
+        maxTokens: MAX_TOKENS,
+        timeoutMs: restante - 500,
+      }));
+      const conf2 = bruta2 ? respostaSegura(bruta2, FRASE_PESSOA) : { ok: false, motivo: 'ia_sem_resposta' };
+      if (conf2.ok) { conf = conf2; final = bruta2; console.error('[manychat] reescrita passou'); }
+      else console.error('[manychat] reescrita tambem barrada (' + conf2.motivo + ')');
+    }
+
     // Falou de si em vez de atender: mensagem curta recebe a frase natural de
-    // confirmacao; pergunta de verdade recebe "uma pessoa responde".
-    let resposta = conf.ok ? V.limparResposta(bruta) : conf.texto;
+    // confirmacao; pergunta de verdade recebe "alguem da equipe".
+    let resposta = conf.ok ? V.limparResposta(final) : conf.texto;
     if (!conf.ok && conf.motivo === 'resposta_meta' && texto.split(/\s+/).length <= 4 && texto.indexOf('?') === -1) {
       const ultVik = historico.filter(function (m) { return m && m.role === 'assistant'; }).pop();
       resposta = V.respostaConfirmacao(texto, ultVik ? ultVik.texto : '');
@@ -176,7 +215,7 @@ module.exports = async (req, res) => {
         { role: 'user', texto: texto },
         { role: 'assistant', texto: resposta },
       ]).slice(-MAX_HISTORICO),
-      ramo: ramo || conv.ramo || '',
+      ramo: ramoUsado,
       atualizadoEm: admin.firestore.FieldValue.serverTimestamp(),
       expiraEm: admin.firestore.Timestamp.fromDate(expira),
     }, { merge: true });
