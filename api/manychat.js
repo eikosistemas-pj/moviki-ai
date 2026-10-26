@@ -1,4 +1,9 @@
-// api/manychat.js  (repo: moviki-ai)  versao 2026-10-09-direct
+// api/manychat.js  (repo: moviki-ai)  versao 2026-10-26-contexto | antes 2026-10-09-direct
+// 26/10/2026 — "Perfeito" no direct virava "Estou pronto para atender...
+// Resumo do que tenho: ✅...". Agora: confirmacao curta responde com frase
+// fixa sem gastar IA; resposta que fala de si (resposta_meta no
+// segurancaVik) nunca chega ao cliente; historico contaminado e limpo antes de
+// ir para a IA. Ver lib/vikDirect.js.
 //
 // O Vik no DIRECT DO INSTAGRAM. Quem chama e o ManyChat (bloco "External
 // Request" da automacao "Instagram Default Reply"), quando a mensagem da
@@ -88,6 +93,30 @@ module.exports = async (req, res) => {
   if (!contato || !texto) { responder(res, FRASE_PESSOA, { pulado: 'sem_texto' }); return; }
 
   try {
+    // Confirmacao curta ("perfeito", "ok", "obrigada", emoji): resposta fixa,
+    // sem IA e sem gastar a cota. Le o historico so quando o texto tem cara de
+    // confirmacao (uma leitura barata a mais, nunca nas perguntas).
+    if (V.ehConfirmacaoCurta(texto, '')) {
+      const ref = db.collection('vik_direct').doc(contato);
+      const snap = await ref.get();
+      const d0 = snap.exists ? (snap.data() || {}) : {};
+      const hist0 = Array.isArray(d0.historico) ? d0.historico : [];
+      const ultima = hist0.filter(function (m) { return m && m.role === 'assistant'; }).pop();
+      if (V.ehConfirmacaoCurta(texto, ultima ? ultima.texto : '')) {
+        const fixa = V.respostaConfirmacao(texto, contato, hist0.length);
+        await ref.set({
+          historico: hist0.concat([
+            { role: 'user', texto: texto },
+            { role: 'assistant', texto: fixa },
+          ]).slice(-MAX_HISTORICO),
+          atualizadoEm: admin.firestore.FieldValue.serverTimestamp(),
+          expiraEm: admin.firestore.Timestamp.fromDate(new Date(Date.now() + RETENCAO_DIAS * 86400000)),
+        }, { merge: true });
+        responder(res, fixa, { pulado: 'confirmacao' });
+        return;
+      }
+    }
+
     const dia = hoje();
     const limite = V.numeroEnv(process.env.DIRECT_LIMITE_DIA, V.LIMITE_CONTATO_PADRAO);
     const tetoGlobal = V.numeroEnv(process.env.DIRECT_TETO_GLOBAL_DIA, V.TETO_GLOBAL_PADRAO);
@@ -117,7 +146,8 @@ module.exports = async (req, res) => {
     }
     if (decisao.status !== 'ok') { responder(res, FRASE_PESSOA, { pulado: decisao.status }); return; }
 
-    const historico = Array.isArray(conv.historico) ? conv.historico : [];
+    const ehMeta = function (t) { const c = respostaSegura(t); return !c.ok && c.motivo === 'resposta_meta'; };
+    const historico = V.limparHistorico(conv.historico, ehMeta);
     const bruta = await perguntarClaude({
       systemPrompt: V.montarPrompt(ramo),
       historico,
@@ -132,7 +162,12 @@ module.exports = async (req, res) => {
     // de ganho por escrito, no direct, vira print e restricao de anuncio.
     const conf = respostaSegura(bruta, FRASE_PESSOA);
     if (!conf.ok) console.error('[manychat] resposta BARRADA (' + conf.motivo + ') trecho="' + (conf.trecho || '') + '"');
-    const resposta = conf.ok ? V.limparResposta(bruta) : conf.texto;
+    // Falou de si em vez de atender: mensagem curta recebe a frase natural de
+    // confirmacao; pergunta de verdade recebe "uma pessoa responde".
+    let resposta = conf.ok ? V.limparResposta(bruta) : conf.texto;
+    if (!conf.ok && conf.motivo === 'resposta_meta' && texto.split(/\s+/).length <= 4 && texto.indexOf('?') === -1) {
+      resposta = V.respostaConfirmacao(texto, contato, historico.length);
+    }
 
     const expira = new Date(Date.now() + RETENCAO_DIAS * 86400000);
     await convRef.set({
