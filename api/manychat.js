@@ -1,4 +1,4 @@
-// api/manychat.js  (repo: moviki-ai)  versao 2026-10-26-contexto | antes 2026-10-09-direct
+// api/manychat.js  (repo: moviki-ai)  versao 2026-10-26-semrepetir | 2026-10-26-contexto | antes 2026-10-09-direct
 // 26/10/2026 — "Perfeito" no direct virava "Estou pronto para atender...
 // Resumo do que tenho: ✅...". Agora: confirmacao curta responde com frase
 // fixa sem gastar IA; resposta que fala de si (resposta_meta no
@@ -103,7 +103,7 @@ module.exports = async (req, res) => {
       const hist0 = Array.isArray(d0.historico) ? d0.historico : [];
       const ultima = hist0.filter(function (m) { return m && m.role === 'assistant'; }).pop();
       if (V.ehConfirmacaoCurta(texto, ultima ? ultima.texto : '')) {
-        const fixa = V.respostaConfirmacao(texto, contato, hist0.length);
+        const fixa = V.respostaConfirmacao(texto, ultima ? ultima.texto : '');
         await ref.set({
           historico: hist0.concat([
             { role: 'user', texto: texto },
@@ -166,7 +166,8 @@ module.exports = async (req, res) => {
     // confirmacao; pergunta de verdade recebe "uma pessoa responde".
     let resposta = conf.ok ? V.limparResposta(bruta) : conf.texto;
     if (!conf.ok && conf.motivo === 'resposta_meta' && texto.split(/\s+/).length <= 4 && texto.indexOf('?') === -1) {
-      resposta = V.respostaConfirmacao(texto, contato, historico.length);
+      const ultVik = historico.filter(function (m) { return m && m.role === 'assistant'; }).pop();
+      resposta = V.respostaConfirmacao(texto, ultVik ? ultVik.texto : '');
     }
 
     const expira = new Date(Date.now() + RETENCAO_DIAS * 86400000);
