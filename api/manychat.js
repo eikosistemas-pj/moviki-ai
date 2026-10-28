@@ -1,4 +1,11 @@
-// api/manychat.js  (repo: moviki-ai)  versao 2026-10-26-vendedor | antes 2026-10-26-semrepetir
+// api/manychat.js  (repo: moviki-ai)  versao 2026-10-28-ruido | antes 2026-10-26-vendedor
+// 28/10/2026 (ruido): corrente religiosa, mensagem politica, link de conteudo
+// compartilhado e texto longo encaminhado sem assunto de venda nao chamam a IA,
+// nao gravam nada e nao avisam o Paulo: a resposta volta VAZIA com
+// calar:'sim' (toda resposta leva calar 'sim' ou 'nao'); o ManyChat grava no
+// campo vik_calar e a Condicao antes do bloco de envio nao manda nada. Foto, video e audio soltos tambem
+// ficam calados; so recebem o pedido de mensagem escrita quando o Vik falou com
+// a pessoa nos ultimos 30 min (e resposta a uma pergunta, nao encaminhamento).
 // 26/10/2026 (vendedor): o Vik pensa num rascunho <analise> que sai antes de
 // qualquer filtro; usa o ramo guardado da conversa quando o ManyChat nao
 // manda; audio/foto/figurinha recebem pedido de mensagem escrita (antes:
@@ -53,6 +60,7 @@ const TIMEOUT_IA_MS = 7500; // o ManyChat desiste da chamada em 10 s
 const PRAZO_TOTAL_MS = 9000; // margem para gravar e responder antes dos 10 s
 const MAX_TOKENS = 500;      // rascunho <analise> (~60) + mensagem (~250)
 const RETENCAO_DIAS = 30;
+const JANELA_MIDIA_MS = 30 * 60000; // foto/audio logo depois de falar com o Vik = resposta
 
 // Vale para erro, teto e resposta barrada: nao pode soar como resposta a uma
 // pergunta (antes comecava com "Boa pergunta!", ate para um "ok").
@@ -81,8 +89,15 @@ async function avisarTelegram(texto) {
   } catch (_) {}
 }
 
+// Calado: toda resposta leva calar 'sim' ou 'nao' (texto, para o ManyChat
+// gravar sem conversao no campo vik_calar); a Condicao do fluxo "Instagram
+// Default Reply" so chega ao bloco de envio com vik_calar diferente de 'sim'.
+function calar(res, motivo) {
+  res.status(200).json({ ok: true, resposta: '', silencio: true, calar: 'sim', vik: false, pulado: motivo });
+}
+
 function responder(res, resposta, extra) {
-  res.status(200).json(Object.assign({ ok: true, resposta: resposta, vik: extra && extra.vik === true }, extra || {}));
+  res.status(200).json(Object.assign({ ok: true, resposta: resposta, silencio: false, calar: 'nao', vik: extra && extra.vik === true }, extra || {}));
 }
 
 module.exports = async (req, res) => {
@@ -106,7 +121,25 @@ module.exports = async (req, res) => {
   // Sem contato: nada a fazer. Sem texto (audio, foto, figurinha, video): pede
   // a mensagem escrita, sem IA.
   if (!contato) { responder(res, FRASE_PESSOA, { pulado: 'sem_contato' }); return; }
-  if (V.ehSemTexto(texto)) { responder(res, FRASE_SEM_TEXTO, { pulado: 'sem_texto' }); return; }
+
+  // Ruido (corrente, politica, link compartilhado): calado, sem IA e sem
+  // gravar o texto — opiniao religiosa ou politica e dado sensivel (LGPD).
+  const ruido = V.ehSemTexto(texto) ? '' : V.ruidoDirect(texto);
+  if (ruido) { calar(res, ruido); return; }
+
+  // Foto, video, audio ou figurinha sem texto: so pede a mensagem escrita se o
+  // Vik conversou com a pessoa ha pouco; encaminhamento solto fica sem resposta.
+  if (V.ehSemTexto(texto)) {
+    let recente = false;
+    try {
+      const s0 = await db.collection('vik_direct').doc(contato).get();
+      const at = s0.exists && s0.get('atualizadoEm');
+      recente = !!(at && typeof at.toMillis === 'function' && Date.now() - at.toMillis() < JANELA_MIDIA_MS);
+    } catch (_) {}
+    if (recente) responder(res, FRASE_SEM_TEXTO, { pulado: 'sem_texto' });
+    else calar(res, 'midia_solta');
+    return;
+  }
 
   try {
     // Confirmacao curta ("perfeito", "ok", "obrigada", emoji): resposta fixa,
