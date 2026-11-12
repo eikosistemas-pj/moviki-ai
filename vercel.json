@@ -1,7 +1,17 @@
 {
   "functions": {
-    "api/chat.js": { "maxDuration": 30 },
-    "api/atendimento.js": { "maxDuration": 30 },
-    "api/manychat.js": { "maxDuration": 15 }
+    "api/chat.js": {
+      "maxDuration": 30
+    },
+    "api/atendimento.js": {
+      "maxDuration": 30
+    },
+    "api/manychat.js": {
+      "maxDuration": 15
+    },
+    "api/provador.js": {
+      "maxDuration": 90,
+      "memory": 1024
+    }
   }
 }
